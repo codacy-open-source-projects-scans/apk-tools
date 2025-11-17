@@ -711,27 +711,6 @@ int apk_ipkg_add_script(struct apk_installed_package *ipkg, struct apk_istream *
 	return apk_ipkg_assign_script(ipkg, type, b);
 }
 
-#ifdef __linux__
-static inline int make_device_tree(struct apk_database *db)
-{
-	if (faccessat(db->root_fd, "dev", F_OK, 0) == 0) return 0;
-	if (mkdirat(db->root_fd, "dev", 0755) < 0 ||
-	    mknodat(db->root_fd, "dev/null", S_IFCHR | 0666, makedev(1, 3)) < 0 ||
-	    mknodat(db->root_fd, "dev/zero", S_IFCHR | 0666, makedev(1, 5)) < 0 ||
-	    mknodat(db->root_fd, "dev/random", S_IFCHR | 0666, makedev(1, 8)) < 0 ||
-	    mknodat(db->root_fd, "dev/urandom", S_IFCHR | 0666, makedev(1, 9)) < 0 ||
-	    mknodat(db->root_fd, "dev/console", S_IFCHR | 0600, makedev(5, 1)) < 0)
-		return -1;
-	return 0;
-}
-#else
-static inline int make_device_tree(struct apk_database *db)
-{
-	(void) db;
-	return 0;
-}
-#endif
-
 int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 			struct apk_database *db,
 			unsigned int type, char **argv)
@@ -766,10 +745,6 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 		if (fd < 0 && apk_make_dirs(root_fd, script_exec_dir, 0700, 0755) < 0) {
 			reason = "failed to prepare dirs for hook scripts: ";
 			goto err_errno;
-		}
-		if (!(db->ctx->flags & APK_NO_CHROOT) && make_device_tree(db) < 0) {
-			apk_warn(out, PKG_VER_FMT ": failed to create initial device nodes: %s",
-				PKG_VER_PRINTF(pkg), apk_error_str(errno));
 		}
 		db->script_dirs_checked = 1;
 	}
@@ -1030,6 +1005,7 @@ static void foreach_reverse_dependency(
 	unsigned int marked = match & APK_FOREACH_MARKED;
 	unsigned int installed = match & APK_FOREACH_INSTALLED;
 	unsigned int one_dep_only = (match & APK_FOREACH_GENID_MASK) && !(match & APK_FOREACH_DEP);
+	unsigned int no_conflicts = (match & APK_FOREACH_NO_CONFLICTS);
 
 	apk_array_foreach_item(name0, rdepends) {
 		apk_array_foreach(p0, name0->providers) {
@@ -1038,6 +1014,7 @@ static void foreach_reverse_dependency(
 			if (marked && !pkg0->marked) continue;
 			if (apk_pkg_match_genid(pkg0, match)) continue;
 			apk_array_foreach(d0, pkg0->depends) {
+				if (no_conflicts && apk_dep_conflict(d0)) continue;
 				if (apk_dep_analyze(pkg0, d0, pkg) & match) {
 					cb(pkg0, d0, pkg, ctx);
 					if (one_dep_only) break;

@@ -188,7 +188,7 @@ struct apk_database {
 	int root_fd, lock_fd, cache_fd;
 	unsigned num_repos, num_repo_tags;
 	const char *cache_dir;
-	char *cache_remount_dir, *root_proc_dir;
+	char *cache_remount_dir;
 	apk_blob_t *noarch;
 	unsigned long cache_remount_flags;
 	unsigned int local_repos, available_repos;
@@ -210,6 +210,7 @@ struct apk_database {
 	unsigned int compat_depversions : 1;
 	unsigned int sorted_names : 1;
 	unsigned int sorted_installed_packages : 1;
+	unsigned int scripts_tar : 1;
 
 	struct apk_dependency_array *world;
 	struct apk_id_cache *id_cache;
