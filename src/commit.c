@@ -14,6 +14,26 @@
 #include "apk_solver.h"
 #include "apk_print.h"
 
+#ifdef __linux__
+static bool running_on_host(void)
+{
+	static const char expected[] = "2 (kthreadd) ";
+	char buf[sizeof expected - 1];
+	bool on_host = false;
+
+	int fd = open("/proc/2/stat", O_RDONLY);
+	if (fd >= 0) {
+		if (read(fd, buf, sizeof buf) == sizeof buf &&
+		    memcmp(buf, expected, sizeof buf) == 0)
+			on_host = true;
+		close(fd);
+	}
+	return on_host;
+}
+#else
+static bool running_on_host(void) { return false; }
+#endif
+
 struct apk_stats {
 	uint64_t bytes;
 	unsigned int changes;
@@ -256,7 +276,8 @@ static int run_commit_hook(void *ctx, int dirfd, const char *path, const char *f
 	struct apk_commit_hook *hook = (struct apk_commit_hook *) ctx;
 	struct apk_database *db = hook->db;
 	struct apk_out *out = &db->ctx->out;
-	char fn[PATH_MAX], *argv[] = { fn, (char *) commit_hook_str[hook->type], NULL };
+	char buf[PATH_MAX], fn[PATH_MAX], *argv[] = { fn, (char *) commit_hook_str[hook->type], NULL };
+	const char *linepfx;
 	int ret = 0;
 
 	if (file[0] == '.') return 0;
@@ -267,9 +288,16 @@ static int run_commit_hook(void *ctx, int dirfd, const char *path, const char *f
 		apk_msg(out, "Skipping: %s %s", fn, commit_hook_str[hook->type]);
 		return 0;
 	}
-	apk_dbg(out, "Executing: %s %s", fn, commit_hook_str[hook->type]);
 
-	if (apk_db_run_script(db, commit_hook_str[hook->type], NULL, -1, argv) < 0 && hook->type == PRE_COMMIT_HOOK)
+	if (apk_out_verbosity(out) >= 2) {
+		apk_dbg(out, "Executing /%s %s", fn, commit_hook_str[hook->type]);
+		linepfx = "* ";
+	} else {
+		apk_out_progress_note(out, "executing %s %s", commit_hook_str[hook->type], file);
+		linepfx = apk_fmts(buf, sizeof buf, "Executing %s %s\n* ", commit_hook_str[hook->type], file);
+	}
+
+	if (apk_db_run_script(db, commit_hook_str[hook->type], NULL, -1, argv, linepfx) < 0 && hook->type == PRE_COMMIT_HOOK)
 		ret = -2;
 
 	return ret;
@@ -283,6 +311,15 @@ static int run_commit_hooks(struct apk_database *db, int type)
 		"etc/apk/commit_hooks.d",
 		"lib/apk/commit_hooks.d",
 		NULL);
+}
+
+static void sync_if_needed(struct apk_database *db)
+{
+	struct apk_ctx *ac = db->ctx;
+	if (ac->sync == APK_NO) return;
+	if (ac->sync == APK_AUTO && (ac->root_set || db->usermode || !running_on_host())) return;
+	apk_out_progress_note(&ac->out, "syncing disks...");
+	sync();
 }
 
 static int calc_precision(unsigned int num)
@@ -352,8 +389,9 @@ int apk_solver_commit_changeset(struct apk_database *db,
 {
 	struct apk_out *out = &db->ctx->out;
 	struct progress prog = { 0 };
-	const char *size_unit;
-	uint64_t humanized, download_size = 0;
+	char buf[64];
+	apk_blob_t humanized;
+	uint64_t download_size = 0;
 	int64_t size_diff = 0;
 	int r, errors = 0, pkg_diff = 0;
 
@@ -385,7 +423,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 	}
 	prog.total_changes_digits = calc_precision(prog.total.changes);
 
-	if (apk_out_verbosity(out) > 1 || (db->ctx->flags & APK_INTERACTIVE)) {
+	if (apk_out_verbosity(out) > 1 || db->ctx->interactive) {
 		struct apk_change_array *sorted;
 		bool details = apk_out_verbosity(out) >= 2;
 
@@ -400,7 +438,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 			"The following packages will be REMOVED");
 		r += dump_packages(db, sorted, cmp_downgrade, details,
 			"The following packages will be DOWNGRADED");
-		if (r || (db->ctx->flags & APK_INTERACTIVE) || apk_out_verbosity(out) > 2) {
+		if (r || db->ctx->interactive || apk_out_verbosity(out) > 2) {
 			r += dump_packages(db, sorted, cmp_new, details,
 				"The following NEW packages will be installed");
 			r += dump_packages(db, sorted, cmp_upgrade, details,
@@ -408,20 +446,18 @@ int apk_solver_commit_changeset(struct apk_database *db,
 			r += dump_packages(db, sorted, cmp_reinstall, details,
 				"The following packages will be reinstalled");
 			if (download_size) {
-				size_unit = apk_get_human_size(download_size, &humanized);
-				apk_msg(out, "Need to download %" PRIu64 " %s of packages.",
-					humanized, size_unit);
+				humanized = apk_fmt_human_size(buf, sizeof buf, download_size, 1);
+				apk_msg(out, "Need to download " BLOB_FMT " of packages.", BLOB_PRINTF(humanized));
 			}
-			size_unit = apk_get_human_size(llabs(size_diff), &humanized);
-			apk_msg(out, "After this operation, %" PRIu64 " %s of %s.",
-				humanized, size_unit,
-				(size_diff < 0) ?
+			humanized = apk_fmt_human_size(buf, sizeof buf, llabs(size_diff), 1);
+			apk_msg(out, "After this operation, " BLOB_FMT " of %s.",
+				BLOB_PRINTF(humanized), (size_diff < 0) ?
 				"disk space will be freed" :
 				"additional disk space will be used");
 		}
 		apk_change_array_free(&sorted);
 
-		if (r > 0 && (db->ctx->flags & APK_INTERACTIVE) && !(db->ctx->flags & APK_SIMULATE)) {
+		if (r > 0 && db->ctx->interactive && !(db->ctx->flags & APK_SIMULATE)) {
 			printf("Do you want to continue [Y/n]? ");
 			fflush(stdout);
 			r = fgetc(stdin);
@@ -440,6 +476,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		return -1;
 
 	/* Go through changes */
+	db->indent_level = 1;
 	apk_progress_start(&prog.prog, out, "install", apk_progress_weight(prog.total.bytes, prog.total.packages));
 	apk_array_foreach(change, changeset->changes) {
 		r = change->old_pkg &&
@@ -460,6 +497,7 @@ int apk_solver_commit_changeset(struct apk_database *db,
 		count_change(change, &prog.done);
 	}
 	apk_progress_end(&prog.prog);
+	db->indent_level = 0;
 
 	errors += db->num_dir_update_errors;
 	errors += run_triggers(db, changeset);
@@ -472,6 +510,8 @@ all_done:
 	if (!db->performing_preupgrade) {
 		char buf[32];
 		const char *msg = "OK:";
+
+		sync_if_needed(db);
 
 		if (errors) msg = apk_fmts(buf, sizeof buf, "%d error%s;",
 				errors, errors > 1 ? "s" : "") ?: "ERRORS;";

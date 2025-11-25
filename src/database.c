@@ -241,6 +241,9 @@ void apk_db_dir_prepare(struct apk_database *db, struct apk_db_dir *dir, struct 
 	if (dir->created) return;
 	dir->created = 1;
 
+	if (dir->parent && !dir->parent->created)
+		apk_db_dir_prepare(db, dir->parent, apk_default_acl_dir, apk_default_acl_dir);
+
 	apk_fsdir_get(&d, APK_BLOB_PTR_LEN(dir->name, dir->namelen), db->extract_flags, db->ctx, APK_BLOB_NULL);
 	if (!expected_acl) {
 		/* Directory should not exist. Create it. */
@@ -1775,11 +1778,11 @@ static int unshare_mount_namespace(bool usermode)
 	return 0;
 }
 
-static int detect_tmpfs_root(struct apk_database *db)
+static int detect_tmpfs(int fd)
 {
 	struct statfs stfs;
 
-	return fstatfs(db->root_fd, &stfs) == 0 && stfs.f_type == TMPFS_MAGIC;
+	return fstatfs(fd, &stfs) == 0 && stfs.f_type == TMPFS_MAGIC;
 }
 
 static unsigned long map_statfs_flags(unsigned long f_flag)
@@ -1867,9 +1870,8 @@ static int unshare_mount_namespace(bool usermode)
 	return 0;
 }
 
-static int detect_tmpfs_root(struct apk_database *db)
+static int detect_tmpfs(int fd)
 {
-	(void) db;
 	return 0;
 }
 
@@ -1965,7 +1967,6 @@ void apk_db_init(struct apk_database *db, struct apk_ctx *ac)
 	apk_name_array_init(&db->available.sorted_names);
 	apk_package_array_init(&db->installed.sorted_packages);
 	apk_repoparser_init(&db->repoparser, &ac->out, &db_repoparser_ops);
-	db->permanent = 1;
 	db->root_fd = -1;
 	db->noarch = apk_atomize_dup(&db->atoms, APK_BLOB_STRLIT("noarch"));
 }
@@ -1990,8 +1991,8 @@ int apk_db_open(struct apk_database *db)
 
 	setup_cache_repository(db, APK_BLOB_STR(ac->cache_dir));
 	db->root_fd = apk_ctx_fd_root(ac);
+	db->root_tmpfs = (ac->root_tmpfs == APK_AUTO) ? detect_tmpfs(db->root_fd) : ac->root_tmpfs;
 	db->cache_fd = -APKE_CACHE_NOT_AVAILABLE;
-	db->permanent = !detect_tmpfs_root(db);
 	db->usermode = !!(ac->open_flags & APK_OPENF_USERMODE);
 
 	if (!(ac->open_flags & APK_OPENF_CREATE)) {
@@ -2096,7 +2097,7 @@ int apk_db_open(struct apk_database *db)
 	}
 
 	if (!(ac->open_flags & APK_OPENF_NO_INSTALLED_REPO)) {
-		if (apk_db_cache_active(db)) {
+		if (!apk_db_permanent(db) && apk_db_cache_active(db)) {
 			apk_db_index_read(db, apk_istream_from_file(db->cache_fd, "installed"), APK_REPO_CACHE_INSTALLED);
 		}
 	}
@@ -2392,11 +2393,10 @@ int apk_db_fire_triggers(struct apk_database *db)
 
 static void script_panic(const char *reason)
 {
-	// The parent will prepend argv0 to the logged string
 	char buf[256];
 	int n = apk_fmt(buf, sizeof buf, "%s: %s\n", reason, strerror(errno));
 	apk_write_fully(STDERR_FILENO, buf, n);
-	exit(127);
+	_exit(127);
 }
 
 struct env_buf {
@@ -2413,7 +2413,7 @@ static void env_buf_add(struct env_buf *enb, const char *key, const char *val)
 	enb->pos += n + 1;
 }
 
-int apk_db_run_script(struct apk_database *db, const char *hook_type, const char *package_name, int fd, char **argv)
+int apk_db_run_script(struct apk_database *db, const char *hook_type, const char *package_name, int fd, char **argv, const char *logpfx)
 {
 	struct env_buf enb;
 	struct apk_ctx *ac = db->ctx;
@@ -2422,7 +2422,7 @@ int apk_db_run_script(struct apk_database *db, const char *hook_type, const char
 	int r, env_size_save = apk_array_len(ac->script_environment);
 	const char *argv0 = apk_last_path_segment(argv[0]);
 
-	r = apk_process_init(&p, argv0, out, NULL);
+	r = apk_process_init(&p, argv[0], logpfx, out, NULL);
 	if (r != 0) goto err;
 
 	enb.arr = &ac->script_environment;
@@ -2504,7 +2504,7 @@ int apk_db_cache_foreach_item(struct apk_database *db, apk_cache_item_cb cb)
 
 int apk_db_permanent(struct apk_database *db)
 {
-	return db->permanent;
+	return !db->root_tmpfs;
 }
 
 int apk_db_check_world(struct apk_database *db, struct apk_dependency_array *world)
@@ -3040,8 +3040,7 @@ static uint8_t apk_db_migrate_files_for_priority(struct apk_database *db,
 					} else {
 						// All files differ. Use the package's file as .apk-new.
 						ctrl = APK_FS_CTRL_APKNEW;
-						apk_msg(out, PKG_VER_FMT ": installing file to " DIR_FILE_FMT "%s",
-						    PKG_VER_PRINTF(ipkg->pkg),
+						apk_msg(out, "  Installing file to " DIR_FILE_FMT "%s",
 						    DIR_FILE_PRINTF(diri->dir, file),
 						    db->ctx->apknew_suffix);
 					}

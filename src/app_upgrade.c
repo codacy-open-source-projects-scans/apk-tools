@@ -59,7 +59,7 @@ static int upgrade_parse_option(void *ctx, struct apk_ctx *ac, int opt, const ch
 		break;
 	case OPT_UPGRADE_preupgrade:
 	case OPT_UPGRADE_self_upgrade:
-		uctx->preupgrade = APK_OPT_BOOL_VAL(optarg);
+		uctx->preupgrade = APK_OPTARG_VAL(optarg);
 		break;
 	case OPT_UPGRADE_preupgrade_only:
 	case OPT_UPGRADE_self_upgrade_only:
@@ -150,6 +150,8 @@ int apk_do_preupgrade(struct apk_database *db, unsigned short solver_flags, unsi
 		apk_warn(out, "This simulation might not reliable as a preupgrade is available.");
 		goto ret;
 	}
+
+	if (preupgrade_only) db->performing_preupgrade = 0;
 
 	apk_msg(out, "Preupgrading:");
 	r = apk_solver_commit_changeset(db, &changeset, db->world);

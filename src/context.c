@@ -27,11 +27,12 @@ void apk_ctx_init(struct apk_ctx *ac)
 	ac->out.out = stdout;
 	ac->out.err = stderr;
 	ac->out.verbosity = 1;
-	ac->out.progress_char = "#";
 	ac->cache_max_age = 4*60*60; /* 4 hours default */
 	apk_id_cache_init(&ac->id_cache, -1);
 	ac->root_fd = -1;
 	ac->legacy_info = 1;
+	ac->root_tmpfs = APK_AUTO;
+	ac->sync = APK_AUTO;
 	ac->apknew_suffix = ".apk-new";
 	ac->default_pkgname_spec = APK_BLOB_STRLIT("${name}-${version}.apk");
 	ac->default_reponame_spec = APK_BLOB_STRLIT("${arch}/${name}-${version}.apk");;
@@ -57,6 +58,9 @@ void apk_ctx_free(struct apk_ctx *ac)
 
 int apk_ctx_prepare(struct apk_ctx *ac)
 {
+	apk_out_configure_progress(&ac->out, ac->on_tty);
+	if (ac->interactive == APK_AUTO) ac->interactive = ac->on_tty;
+	if (ac->pretty_print == APK_AUTO) ac->pretty_print = ac->on_tty;
 	if (ac->flags & APK_SIMULATE &&
 	    ac->open_flags & (APK_OPENF_CREATE | APK_OPENF_WRITE)) {
 		ac->open_flags &= ~(APK_OPENF_CREATE | APK_OPENF_WRITE);
