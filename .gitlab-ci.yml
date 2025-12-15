@@ -20,7 +20,9 @@ variables:
     - meson test -C build
     - install -s -m0755 build-static/src/apk build-static/src/apk.static-$ARCH
   artifacts:
+    when: always
     paths:
+      - build/meson-logs/testlog.txt
       - build-static/src/apk.static-*
     reports:
       junit: build/**/*.junit.xml
@@ -46,7 +48,7 @@ build:alpine-alt-config:
   image: alpinelinux/build-base:latest-x86_64
   script:
     - abuild-apk add -u meson $ALPINE_DEPS
-    - meson setup build -Durl_backend=wget -Dzstd=false
+    - meson setup build -Durl_backend=wget -Dzstd=disabled
     - ninja -C build
   tags:
     - docker-alpine
@@ -98,6 +100,9 @@ build:fedora:
     - meson compile -C build
     - meson test -C build
   artifacts:
+    when: always
+    paths:
+      - build/meson-logs/testlog.txt
     reports:
       junit: build/**/*.junit.xml
   tags:

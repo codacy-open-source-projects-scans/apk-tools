@@ -51,7 +51,7 @@ struct apk_installed_package *apk_pkg_install(struct apk_database *db,
 	apk_db_dir_instance_array_init(&ipkg->diris);
 
 	/* Overlay override information resides in a nameless package */
-	if (pkg->name != NULL) {
+	if (pkg->name) {
 		db->sorted_installed_packages = 0;
 		db->installed.stats.packages++;
 		db->installed.stats.bytes += pkg->installed_size;
@@ -70,13 +70,14 @@ void apk_pkg_uninstall(struct apk_database *db, struct apk_package *pkg)
 	if (ipkg == NULL)
 		return;
 
-	if (db != NULL) {
-		db->sorted_installed_packages = 0;
-		db->installed.stats.packages--;
-		db->installed.stats.bytes -= pkg->installed_size;
+	if (pkg->name) {
+		list_del(&ipkg->installed_pkgs_list);
+		if (db) {
+			db->sorted_installed_packages = 0;
+			db->installed.stats.packages--;
+			db->installed.stats.bytes -= pkg->installed_size;
+		}
 	}
-
-	list_del(&ipkg->installed_pkgs_list);
 
 	if (apk_array_len(ipkg->triggers) != 0) {
 		list_del(&ipkg->trigger_pkgs_list);
@@ -712,6 +713,27 @@ int apk_ipkg_add_script(struct apk_installed_package *ipkg, struct apk_istream *
 	return apk_ipkg_assign_script(ipkg, type, b);
 }
 
+#ifdef __linux__
+static inline int make_device_tree(struct apk_database *db)
+{
+	if (faccessat(db->root_fd, "dev", F_OK, 0) == 0) return 0;
+	if (mkdirat(db->root_fd, "dev", 0755) < 0 ||
+	    mknodat(db->root_fd, "dev/null", S_IFCHR | 0666, makedev(1, 3)) < 0 ||
+	    mknodat(db->root_fd, "dev/zero", S_IFCHR | 0666, makedev(1, 5)) < 0 ||
+	    mknodat(db->root_fd, "dev/random", S_IFCHR | 0666, makedev(1, 8)) < 0 ||
+	    mknodat(db->root_fd, "dev/urandom", S_IFCHR | 0666, makedev(1, 9)) < 0 ||
+	    mknodat(db->root_fd, "dev/console", S_IFCHR | 0600, makedev(5, 1)) < 0)
+		return -1;
+	return 0;
+}
+#else
+static inline int make_device_tree(struct apk_database *db)
+{
+	(void) db;
+	return 0;
+}
+#endif
+
 int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 			struct apk_database *db,
 			unsigned int type, char **argv)
@@ -734,18 +756,24 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 
 	argv[0] = fn;
 
-	if (db->root_dev_works) {
+	if (!db->memfd_failed) {
 		/* Linux kernel >= 6.3 */
 		fd = memfd_create(fn, MFD_EXEC);
 		if (fd < 0 && errno == EINVAL) {
 			/* Linux kernel < 6.3 */
 			fd = memfd_create(fn, 0);
+			if (fd < 0) db->memfd_failed = 1;
 		}
 	}
 	if (!db->script_dirs_checked) {
 		if (fd < 0 && apk_make_dirs(root_fd, script_exec_dir, 0700, 0755) < 0) {
 			reason = "failed to prepare dirs for hook scripts: ";
 			goto err_errno;
+		}
+		if (!db->root_dev_ok && !db->need_unshare) {
+			if (make_device_tree(db) < 0)
+				apk_warn(out, PKG_VER_FMT ": failed to create initial device nodes: %s",
+					 PKG_VER_PRINTF(pkg), apk_error_str(errno));
 		}
 		db->script_dirs_checked = 1;
 	}
@@ -761,6 +789,10 @@ int apk_ipkg_run_script(struct apk_installed_package *ipkg,
 	if (created) {
 		close(fd);
 		fd = -1;
+	} else {
+#ifdef F_ADD_SEALS
+		fcntl(fd, F_ADD_SEALS, F_SEAL_EXEC);
+#endif
 	}
 
 	apk_msg(out, "%sExecuting " PKG_VER_FMT ".%s",

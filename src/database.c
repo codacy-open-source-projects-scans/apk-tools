@@ -1756,9 +1756,9 @@ static int write_file(const char *fn, const char *fmt, ...)
 	return ret;
 }
 
-static int unshare_mount_namespace(bool usermode)
+static int unshare_mount_namespace(struct apk_database *db)
 {
-	if (usermode) {
+	if (db->usermode) {
 		uid_t uid = getuid();
 		gid_t gid = getgid();
 		if (unshare(CLONE_NEWNS | CLONE_NEWUSER) != 0) return -1;
@@ -1770,11 +1770,16 @@ static int unshare_mount_namespace(bool usermode)
 		if (unshare(CLONE_NEWNS) != 0) return 0;
 	}
 	if (mount("none", "/", NULL, MS_REC|MS_PRIVATE, NULL) != 0) return -1;
-	// Create /proc and /dev in the chroot
-	mkdir("proc", 0755);
-	mount("/proc", "proc", NULL, MS_BIND, NULL);
-	mkdir("dev", 0755);
-	mount("/dev", "dev", NULL, MS_BIND|MS_REC|MS_RDONLY, NULL);
+	// Create /proc and /dev in the chroot if needed
+	if (!db->root_proc_ok) {
+		mkdir("proc", 0755);
+		if (mount("/proc", "proc", NULL, MS_BIND|MS_REC, NULL) < 0)
+			mount("proc", "proc", "proc", 0, NULL);
+	}
+	if (!db->root_dev_ok) {
+		mkdir("dev", 0755);
+		mount("/dev", "dev", NULL, MS_BIND|MS_REC|MS_RDONLY, NULL);
+	}
 	return 0;
 }
 
@@ -1865,7 +1870,7 @@ static void remount_cache_ro(struct apk_database *db)
 	db->cache_remount_dir = NULL;
 }
 #else
-static int unshare_mount_namespace(bool usermode)
+static int unshare_mount_namespace(struct apk_database *db)
 {
 	return 0;
 }
@@ -2020,8 +2025,23 @@ int apk_db_open(struct apk_database *db)
 	}
 	apk_variable_set(&db->repoparser.variables, APK_BLOB_STRLIT("APK_ARCH"), *db->arches->item[0], APK_VARF_READONLY);
 
-	if (ac->flags & APK_NO_CHROOT) db->root_dev_works = access("/dev/fd/0", R_OK) == 0;
-	else db->root_dev_works = faccessat(db->root_fd, "dev/fd/0", R_OK, 0) == 0;
+	// In usermode, unshare is need for chroot(2). Otherwise, it is needed
+	// for new mount namespace to bind mount proc and dev from system root.
+	if ((db->usermode || ac->root_set) && !(ac->flags & APK_NO_CHROOT)) {
+		db->root_proc_ok = faccessat(db->root_fd, "proc/self", R_OK, 0) == 0;
+		db->root_dev_ok = faccessat(db->root_fd, "dev/null", R_OK, 0) == 0;
+		db->need_unshare = db->usermode || (!db->root_proc_ok || !db->root_dev_ok);
+
+		// Check if unshare() works. It could be disabled, or seccomp filtered (docker).
+		if (db->need_unshare && !db->usermode && unshare(0) < 0) {
+			db->need_unshare = 0;
+			db->memfd_failed = !db->root_proc_ok;
+		}
+	} else {
+		db->root_proc_ok = access("/proc/self", R_OK) == 0;
+		db->root_dev_ok = 1;
+		db->memfd_failed = !db->root_proc_ok;
+	}
 
 	db->id_cache = apk_ctx_get_id_cache(ac);
 
@@ -2420,10 +2440,15 @@ int apk_db_run_script(struct apk_database *db, const char *hook_type, const char
 	struct apk_out *out = &ac->out;
 	struct apk_process p;
 	int r, env_size_save = apk_array_len(ac->script_environment);
+	char fd_path[NAME_MAX];
 	const char *argv0 = apk_last_path_segment(argv[0]);
+	const char *path = (fd < 0) ? argv[0] : apk_fmts(fd_path, sizeof fd_path, "/proc/self/fd/%d", fd);
 
 	r = apk_process_init(&p, argv[0], logpfx, out, NULL);
-	if (r != 0) goto err;
+	if (r != 0) {
+		apk_err(out, "%s: process init: %s", argv0, apk_error_str(r));
+		goto err;
+	}
 
 	enb.arr = &ac->script_environment;
 	enb.pos = 0;
@@ -2441,12 +2466,11 @@ int apk_db_run_script(struct apk_database *db, const char *hook_type, const char
 		umask(0022);
 		if (fchdir(db->root_fd) != 0) script_panic("fchdir");
 		if (!(ac->flags & APK_NO_CHROOT)) {
-			if (unshare_mount_namespace(db->usermode) < 0) script_panic("unshare");
-			if (chroot(".") != 0) script_panic("chroot");
+			if (db->need_unshare && unshare_mount_namespace(db) < 0) script_panic("unshare");
+			if (ac->root_set && chroot(".") != 0) script_panic("chroot");
 		}
 		char **envp = &ac->script_environment->item[0];
-		if (fd >= 0) fexecve(fd, argv, envp);
-		execve(argv[0], argv, envp);
+		execve(path, argv, envp);
 		script_panic("execve");
 	}
 	r = apk_process_run(&p);

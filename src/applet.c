@@ -43,24 +43,34 @@ static inline int is_group(struct apk_applet *applet, const char *topic)
 	if (applet->optgroup_query && strcmp(topic, "QUERY") == 0) return 1;
 	return 0;
 }
-#endif
+
+static bool decompress_help(char *buf, size_t bufsz)
+{
+	z_stream strm = {
+		.avail_in = sizeof compressed_help,
+		.next_in = (unsigned char *) compressed_help,
+		.avail_out = bufsz,
+		.next_out = (unsigned char *) buf,
+	};
+	/* Use inflateInit2 with windowBits=47 (15+32) to auto-detect gzip or zlib format */
+	int ret = inflateInit2(&strm, 15 + 32);
+	if (ret != Z_OK) return false;
+	ret = inflate(&strm, Z_FINISH);
+	inflateEnd(&strm);
+	return ret == Z_STREAM_END && strm.total_out == bufsz;
+}
 
 void apk_applet_help(struct apk_applet *applet, struct apk_out *out)
 {
-#ifndef NO_HELP
-#ifdef COMPRESSED_HELP
-	unsigned char buf[payload_help_size];
-#endif
-	const char *ptr = (const char *) payload_help, *base = ptr, *msg;
-	unsigned long len = payload_help_size;
+	char buf[uncompressed_help_size];
 	int num = 0;
 
-#ifdef COMPRESSED_HELP
-	uncompress(buf, &len, payload_help, sizeof payload_help);
-	ptr = base = (const char *) buf;
-	len = sizeof buf;
-#endif
-	for (; *ptr && ptr < &base[len]; ptr = msg + strlen(msg) + 1) {
+	if (!decompress_help(buf, sizeof buf)) {
+		apk_err(out, "Help decompression failed");
+		return;
+	}
+
+	for (const char *ptr = buf, *msg; *ptr && ptr < &buf[sizeof buf]; ptr = msg + strlen(msg) + 1) {
 		msg = ptr + strlen(ptr) + 1;
 		if (is_group(applet, ptr)) {
 			fputc('\n', stdout);
@@ -69,8 +79,11 @@ void apk_applet_help(struct apk_applet *applet, struct apk_out *out)
 		}
 	}
 	if (num == 0) apk_err(out, "Help not found");
+}
 #else
+void apk_applet_help(struct apk_applet *applet, struct apk_out *out)
+{
 	fputc('\n', stdout);
 	apk_err(out, "This apk-tools has been built without help");
-#endif
 }
+#endif

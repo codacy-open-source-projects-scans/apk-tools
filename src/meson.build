@@ -71,38 +71,14 @@ libapk_headers = [
 
 apk_src = [
 	'apk.c',
-	'app_adbdump.c',
-	'app_adbgen.c',
-	'app_adbsign.c',
-	'app_add.c',
-	'app_audit.c',
-	'app_cache.c',
-	'app_convdb.c',
-	'app_convndx.c',
-	'app_del.c',
-	'app_dot.c',
-	'app_extract.c',
-	'app_fetch.c',
-	'app_fix.c',
-	'app_index.c',
-	'app_info.c',
-	'app_list.c',
-	'app_manifest.c',
-	'app_mkndx.c',
-	'app_mkpkg.c',
-	'app_policy.c',
-	'app_query.c',
-	'app_update.c',
-	'app_upgrade.c',
-	'app_search.c',
-	'app_stats.c',
-	'app_verify.c',
-	'app_version.c',
 	'applet.c',
 ]
 
+foreach a : applets
+	apk_src += [ 'app_' + a + '.c' ]
+endforeach
+
 apk_cargs = [
-	'-D_ATFILE_SOURCE',
 	'-DAPK_VERSION="' + meson.project_version() + '"',
 ]
 
@@ -112,9 +88,6 @@ if lua_bin.found()
 	lua_env.append('LUA_PATH', meson.current_source_dir() / '?.lua', separator: ';')
 
 	genhelp_args = [lua_bin, genhelp_script, '@INPUT@']
-	if not get_option('compressed-help')
-		genhelp_args += ['--no-zlib']
-	endif
 
 	generated_help = custom_target(
 		'help.h',
@@ -163,7 +136,7 @@ if apk_uvol_db_target != ''
 	apk_cargs += ['-DAPK_UVOL_DB_TARGET="@0@"'.format(apk_uvol_db_target)]
 endif
 
-if get_option('zstd')
+if libzstd_dep.found()
 	libapk_src += [ 'io_zstd.c' ]
 	apk_cargs += [ '-DHAVE_ZSTD' ]
 endif

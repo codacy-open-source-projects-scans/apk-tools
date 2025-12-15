@@ -316,6 +316,7 @@ static int run_commit_hooks(struct apk_database *db, int type)
 static void sync_if_needed(struct apk_database *db)
 {
 	struct apk_ctx *ac = db->ctx;
+	if (ac->flags & APK_SIMULATE) return;
 	if (ac->sync == APK_NO) return;
 	if (ac->sync == APK_AUTO && (ac->root_set || db->usermode || !running_on_host())) return;
 	apk_out_progress_note(&ac->out, "syncing disks...");
@@ -508,12 +509,12 @@ all_done:
 	run_commit_hooks(db, POST_COMMIT_HOOK);
 
 	if (!db->performing_preupgrade) {
-		char buf[32];
+		char buf2[32];
 		const char *msg = "OK:";
 
 		sync_if_needed(db);
 
-		if (errors) msg = apk_fmts(buf, sizeof buf, "%d error%s;",
+		if (errors) msg = apk_fmts(buf2, sizeof buf2, "%d error%s;",
 				errors, errors > 1 ? "s" : "") ?: "ERRORS;";
 
 		uint64_t installed_bytes = db->installed.stats.bytes;
@@ -523,18 +524,20 @@ all_done:
 			installed_packages += pkg_diff;
 		}
 
+		humanized = apk_fmt_human_size(buf, sizeof buf, installed_bytes, 1);
+
 		if (apk_out_verbosity(out) > 1) {
-			apk_msg(out, "%s %d packages, %d dirs, %d files, %" PRIu64 " MiB",
+			apk_msg(out, "%s %d packages, %d dirs, %d files, " BLOB_FMT,
 				msg,
 				installed_packages,
 				db->installed.stats.dirs,
 				db->installed.stats.files,
-				installed_bytes / (1024 * 1024)
+				BLOB_PRINTF(humanized)
 				);
 		} else {
-			apk_msg(out, "%s %" PRIu64 " MiB in %d packages",
+			apk_msg(out, "%s " BLOB_FMT " in %d packages",
 				msg,
-				installed_bytes / (1024 * 1024),
+				BLOB_PRINTF(humanized),
 				installed_packages);
 		}
 	}
