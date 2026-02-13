@@ -205,16 +205,18 @@ struct apk_provider_array *apk_name_sorted_providers(struct apk_name *name)
 
 static struct apk_db_acl *__apk_db_acl_atomize(struct apk_database *db, mode_t mode, uid_t uid, gid_t gid, uint8_t hash_len, const uint8_t *hash)
 {
-	struct {
-		struct apk_db_acl acl;
-		uint8_t digest[APK_DIGEST_LENGTH_MAX];
-	} data;
+	struct apk_db_acl *acl;
 	apk_blob_t *b;
 
-	data.acl = (struct apk_db_acl) { .mode = mode & 07777, .uid = uid, .gid = gid, .xattr_hash_len = hash_len };
-	if (hash_len) memcpy(data.digest, hash, hash_len);
+	acl = alloca(sizeof(*acl) + hash_len);
+	acl->mode = mode & 07777;
+	acl->uid = uid;
+	acl->gid = gid;
+	acl->xattr_hash_len = hash_len;
 
-	b = apk_atomize_dup(&db->atoms, APK_BLOB_PTR_LEN((char*) &data, sizeof(data.acl) + hash_len));
+	if (hash_len) memcpy(acl->xattr_hash, hash, hash_len);
+
+	b = apk_atomize_dup(&db->atoms, APK_BLOB_PTR_LEN((char*) acl, sizeof(*acl) + hash_len));
 	return (struct apk_db_acl *) b->ptr;
 }
 
@@ -1993,6 +1995,8 @@ void apk_db_init(struct apk_database *db, struct apk_ctx *ac)
 	apk_package_array_init(&db->installed.sorted_packages);
 	apk_repoparser_init(&db->repoparser, &ac->out, &db_repoparser_ops);
 	db->root_fd = -1;
+	db->lock_fd = -1;
+	db->cache_fd = -APKE_CACHE_NOT_AVAILABLE;
 	db->noarch = apk_atomize_dup(&db->atoms, APK_BLOB_STRLIT("noarch"));
 }
 
@@ -2017,7 +2021,6 @@ int apk_db_open(struct apk_database *db)
 	setup_cache_repository(db, APK_BLOB_STR(ac->cache_dir));
 	db->root_fd = apk_ctx_fd_root(ac);
 	db->root_tmpfs = (ac->root_tmpfs == APK_AUTO) ? detect_tmpfs(db->root_fd) : ac->root_tmpfs;
-	db->cache_fd = -APKE_CACHE_NOT_AVAILABLE;
 	db->usermode = !!(ac->open_flags & APK_OPENF_USERMODE);
 
 	if (!(ac->open_flags & APK_OPENF_CREATE)) {
@@ -2219,7 +2222,10 @@ static int apk_db_write_layers(struct apk_database *db)
 
 	for (i = 0; i < APK_DB_LAYER_NUM; i++) {
 		struct layer_data *ld = &layers[i];
-		if (!(db->active_layers & BIT(i))) continue;
+		if (!(db->active_layers & BIT(i))) {
+			ld->fd = -1;
+			continue;
+		}
 
 		ld->fd = openat(db->root_fd, apk_db_layer_name(i), O_DIRECTORY | O_RDONLY | O_CLOEXEC);
 		if (ld->fd < 0) {
@@ -2248,7 +2254,7 @@ static int apk_db_write_layers(struct apk_database *db)
 	pkgs = apk_db_sorted_installed_packages(db);
 	apk_array_foreach_item(pkg, pkgs) {
 		struct layer_data *ld = &layers[pkg->layer];
-		if (!ld->fd) continue;
+		if (ld->fd < 0) continue;
 		apk_db_fdb_write(db, pkg->ipkg, ld->installed);
 		apk_db_scriptdb_write(db, pkg->ipkg, ld->scripts);
 		apk_db_triggers_write(db, pkg->ipkg, ld->triggers);
@@ -2304,7 +2310,7 @@ int apk_db_write_config(struct apk_database *db)
 	if (db->ctx->open_flags & APK_OPENF_CREATE) {
 		apk_make_dirs(db->root_fd, "lib/apk/db", 0755, 0755);
 		apk_make_dirs(db->root_fd, "etc/apk", 0755, 0755);
-	} else if (db->lock_fd == 0) {
+	} else if (db->lock_fd < 0) {
 		apk_err(out, "Refusing to write db without write lock!");
 		return -1;
 	}
@@ -2357,8 +2363,8 @@ void apk_db_close(struct apk_database *db)
 
 	remount_cache_ro(db);
 
-	if (db->cache_fd > 0) close(db->cache_fd);
-	if (db->lock_fd > 0) close(db->lock_fd);
+	if (db->cache_fd >= 0) close(db->cache_fd);
+	if (db->lock_fd >= 0) close(db->lock_fd);
 }
 
 int apk_db_get_tag_id(struct apk_database *db, apk_blob_t tag)
@@ -2501,7 +2507,7 @@ err:
 
 int apk_db_cache_active(struct apk_database *db)
 {
-	return db->cache_fd > 0 && db->ctx->cache_packages;
+	return db->cache_fd >= 0 && db->ctx->cache_packages;
 }
 
 struct foreach_cache_item_ctx {
